@@ -1,5 +1,5 @@
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import itertools
 file_path = os.path.dirname(__file__)
 import sys
@@ -42,61 +42,59 @@ def kpssm_ddt(eachfile, k, aa_index):
         out_box[i] = out_box[i] / (len(eachfile) - k - 1)
     return out_box
 
-
-import concurrent.futures
-from functools import partial
-
-
-def process_single_task(args, reduce, raacode, k=3):
-    """
-    处理单个任务的函数，将被多线程调用
-    """
-    eachfile, file_idx, raa, raa_idx = args
-    raa_box = raacode[0][raa]
-    reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
-    ddt_index = list(range(len(raa_box)))
-
-    # DT 和 DDT 计算
-    dt_fs = kpssm_dt(reducefile, k)
-    ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
-
-    return file_idx, raa_idx, dt_fs + ddt_fs
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 
 
-def feature_kpssm(pssm_matrixes, reduce, raacode, max_workers=None):
-    """
-    优化后的版本：扁平化任务 + 多线程处理
-    """
-    # 1. 任务扁平化：创建所有需要处理的任务列表
+def feature_kpssm(pssm_matrixes, reduce, raacode):
+    """使用进程池的版本，适用于CPU密集型计算"""
+
+    def process_wrapper(args):
+        file_idx, raa_idx, eachfile, reduce, raa, raacode = args
+        raa_box = raacode[0][raa]
+        reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
+        ddt_index = list(range(len(raa_box)))
+        k = 3
+
+        dt_fs = kpssm_dt(reducefile, k)
+        ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
+
+        return file_idx, raa_idx, dt_fs + ddt_fs
+
+    # 准备任务
     tasks = []
     for file_idx, eachfile in enumerate(pssm_matrixes):
         for raa_idx, raa in enumerate(raacode[1]):
-            tasks.append((eachfile, file_idx, raa, raa_idx))
+            tasks.append((file_idx, raa_idx, eachfile, reduce, raa, raacode))
 
-    # 2. 初始化结果存储结构
-    kpssm_features = [[None] * len(raacode[1]) for _ in range(len(pssm_matrixes))]
+    # 使用进程池
+    kpssm_features = [[] for _ in range(len(pssm_matrixes))]
 
-    # 3. 创建线程池并行处理任务
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 使用偏函数固定参数
-        process_func = partial(process_single_task, reduce=reduce, raacode=raacode)
+    # 根据任务数量动态设置进程数
+    num_processes = min(multiprocessing.cpu_count(), len(tasks))
 
-        # 提交所有任务
-        future_to_task = {executor.submit(process_func, task): task for task in tasks}
+    with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        futures = [executor.submit(process_wrapper, task) for task in tasks]
 
-        # 处理完成的任务
-        for future in concurrent.futures.as_completed(future_to_task):
+        for i, future in enumerate(as_completed(futures)):
             try:
                 file_idx, raa_idx, result = future.result()
+                # 确保每个文件的列表有足够的长度
+                while len(kpssm_features[file_idx]) <= raa_idx:
+                    kpssm_features[file_idx].append(None)
                 kpssm_features[file_idx][raa_idx] = result
 
-                # 可选：进度显示（线程安全方式）
-                print(f"进度: 文件 {file_idx + 1}/{len(pssm_matrixes)}, "
-                      f"氨基酸 {raa_idx + 1}/{len(raacode[1])}")
+                # 进度显示
+                if i % 10 == 0:  # 每10个任务更新一次进度，避免太频繁
+                    current_file = file_idx + 1
+                    current_raa = raa_idx + 1
+                    ivis.visual_detal_time(
+                        current_file, len(pssm_matrixes),
+                        current_raa, len(raacode[1])
+                    )
 
             except Exception as e:
-                task = future_to_task[future]
-                print(f"任务处理失败: 文件{task[1]}, 氨基酸{task[3]}, 错误: {e}")
+                print(f"任务处理失败: {e}")
 
     return kpssm_features
 
