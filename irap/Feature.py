@@ -1,6 +1,4 @@
 import os
-from concurrent.futures import ThreadPoolExecutor
-import itertools
 file_path = os.path.dirname(__file__)
 import sys
 sys.path.append(file_path)
@@ -43,93 +41,61 @@ def kpssm_ddt(eachfile, k, aa_index):
     return out_box
 
 
-from multiprocessing import Pool, cpu_count
-import time
-import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
 
-
-def process_single_raa_kpssm(args):
-    """
-    处理单个raa参数的函数 - 优化版本
-    """
-    eachfile, reduce, raa, raacode = args
+# 辅助函数，顶层定义以便子进程能 picklable
+def _process_raa_for_file(args):
+    eachfile, reduce, raa, raacode, start_e, total_files = args
+    # 可选：在子进程里也可以不做进度打印，主进程负责总体进度
     raa_box = raacode[0][raa]
     reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
-
-    # 优化：直接创建range对象，需要时再转换为列表
     ddt_index = list(range(len(raa_box)))
-
     k = 3
-    # DT和DDT计算
     dt_fs = kpssm_dt(reducefile, k)
     ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
+    return raa, dt_fs + ddt_fs
 
-    return dt_fs + ddt_fs
-
-
-def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, length=50, fill='█'):
+def feature_kpssm(pssm_matrixes, reduce, raacode, max_workers=None):
     """
-    打印文本进度条
+    并行化版 feature_kpssm
+    - 每个输入文件内部对 raacode[1] 的计算并行化
+    - 使用 tqdm 显示整体进度（按文件 + 每文件内部任务）
+    - max_workers: None 表示使用 ProcessPoolExecutor 默认的 worker 数量
     """
-    percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
-    filled_length = int(length * iteration // total)
-    bar = fill * filled_length + '-' * (length - filled_length)
-    print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='\r')
-    # 当完成时打印新行
-    if iteration == total:
-        print()
-
-
-def feature_kpssm(pssm_matrixes, reduce, raacode, num_processes=None):
-    """
-    最高效的并行版本 - 带有进度条显示
-    """
-    if num_processes is None:
-        num_processes = max(1, cpu_count() - 1)  # 留一个核心给系统
+    kpssm_features = []
 
     total_files = len(pssm_matrixes)
-    total_raacodes = len(raacode[1])
-    total_tasks = total_files * total_raacodes
+    # 逐文件处理，主进程显示每个文件的进度条，子进程并行计算该文件内的 raa 任务
+    for start_e, eachfile in enumerate(tqdm(pssm_matrixes, desc="Files", unit="file", leave=True), start=1):
+        raas = list(raacode[1])
+        mid_matrix = []
 
-    print(f"开始处理 {total_files} 个PSSM矩阵，每个矩阵 {total_raacodes} 个raacode")
-    print(f"总共 {total_tasks} 个任务，使用 {num_processes} 个进程并行处理")
+        # 准备每个 raa 的参数元组，方便传入子进程
+        tasks_args = [(eachfile, reduce, raa, raacode, start_e, total_files) for raa in raas]
 
-    start_time = time.time()
+        # 使用 ProcessPoolExecutor 并用 tqdm 跟踪该文件内部任务完成情况
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_process_raa_for_file, arg): arg[2] for arg in tasks_args}
+            for f in tqdm(as_completed(futures), total=len(futures), desc=f"File {start_e}/{total_files}", unit="raa", leave=False):
+                # as_completed 的迭代只保证返回顺序为完成顺序；结果按 raa 名称收集后再按 raas 顺序重建
+                pass
 
-    # 一次性准备所有任务参数
-    all_args = []
-    for i, eachfile in enumerate(pssm_matrixes):
-        for raa in raacode[1]:
-            all_args.append((eachfile, reduce, raa, raacode))
+            # 为了保证结果按原始 raas 顺序，先收集所有结果
+            results = []
+            for fut in futures:
+                res = fut.result()
+                results.append(res)  # (raa, feature_list)
 
-    # 优化chunksize - 根据任务数量和进程数动态计算
-    chunksize = max(1, len(all_args) // (num_processes * 4))
-    print(f"使用 chunksize: {chunksize}")
+        # 按 raas 的原始顺序将结果放回 mid_matrix
+        results_dict = {raa: features for raa, features in results}
+        for raa in raas:
+            mid_matrix.append(results_dict[raa])
 
-    # 使用imap_unordered获取结果并显示进度
-    completed = 0
-    all_results = [None] * len(all_args)
-
-    with Pool(processes=num_processes) as pool:
-        # 使用imap_unordered可以更早地获得已完成的结果
-        for i, result in enumerate(pool.imap_unordered(process_single_raa_kpssm, all_args, chunksize=chunksize)):
-            all_results[i] = result
-            completed += 1
-            print_progress_bar(completed, total_tasks, prefix='处理进度', suffix=f'已完成 {completed}/{total_tasks}')
-
-    # 重新组织结果
-    kpssm_features = []
-    results_per_file = len(raacode[1])
-    for i in range(total_files):
-        start_idx = i * results_per_file
-        end_idx = start_idx + results_per_file
-        kpssm_features.append(all_results[start_idx:end_idx])
-
-    total_time = time.time() - start_time
-    print(f"\n所有处理完成! 总耗时: {total_time:.2f}秒")
-    print(f"平均每个任务: {total_time / total_tasks * 1000:.2f}毫秒")
+        kpssm_features.append(mid_matrix)
 
     return kpssm_features
+
 
 
 # RAAC DTPSSM #################################################################
