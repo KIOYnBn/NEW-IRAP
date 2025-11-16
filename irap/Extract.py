@@ -117,28 +117,37 @@ def extract_scale_mf(matrix):
                         matrix[r][i][j][k] = 0
     return matrix
 
-# extract reduce matrix
-def extract_reduce(max_matrix, max_aaid, reduce, raacode):
+from multiprocessing import Pool
+
+def process_single_raa(args):
+    """处理单个raa参数的函数"""
+    each_matrix, each_aaid, reduce, raa = args
+    file = extract_reduce_row_sf(each_matrix, each_aaid, reduce, raa)
+    file = extract_reduce_col_sf(file, reduce, raa)
+    new_box = []
+    for j in file:
+        new_box += j
+    return new_box
+
+
+def extract_reduce(max_matrix, max_aaid, reduce, raacode, num_processes=None):
     out_feature = []
-    start_e = 0
+
     for i in range(len(max_matrix)):
-        start_e += 1
-        start_n = 0
         each_matrix = max_matrix[i]
         each_aaid = max_aaid[i]
-        mid_box = []
-        for raa in raacode[1]:
-            start_n += 1
-            ivis.visual_detal_time(start_e, len(max_matrix), start_n, len(raacode[1]))
-            print(f'test')
-            file = extract_reduce_row_sf(each_matrix, each_aaid, reduce, raa)
-            file = extract_reduce_col_sf(file, reduce, raa)
-            new_box = []
-            for j in file:
-                new_box += j
-            mid_box.append(new_box)
+
+        # 准备参数
+        args_list = [(each_matrix, each_aaid, reduce, raa) for raa in raacode[1]]
+
+        # 使用进程池并行处理
+        with Pool(processes=num_processes) as pool:
+            mid_box = pool.map(process_single_raa, args_list)
+
         out_feature.append(mid_box)
+
     return out_feature
+
 
 # extract mixed feature and save file
 def extract_combine(max_tuble, max_type, out, reduce, raacode, method_id):
