@@ -305,37 +305,24 @@ def feature_kmer(pssm_aaid, raacode):
     psekraac_features = psekraac_sum(k_fs, kg_fs, kgl_fs)
     return psekraac_features
 
-def _process_single_sequence(args):
-    """处理单个序列的辅助函数"""
-    line, raacode = args
-    mid_box = []
-    for raa in raacode[1]:
-        raa_box = raacode[0][raa]
-        aabox = [0] * len(raa_box)  # 创建初始化为0的列表
 
-        for i in line:
-            for j_idx, j in enumerate(raa_box):
-                if i in j:
-                    aabox[j_idx] += 1
-                    break  # 找到匹配就跳出内层循环
-
-        mid_box.append(aabox)
-    return mid_box
-
-
+# AAC #########################################################################
 def feature_oaac(pssm_aaid, raacode):
-    """使用线程池的并行版本"""
     all_features = []
-
-    # 准备任务参数
-    tasks = [(line, raacode) for line in pssm_aaid]
-
-    # 使用线程池（对于这种计算密集型但包含循环的任务，线程池可能更快）
-    with ThreadPoolExecutor() as executor:
-        results = list(executor.map(_process_single_sequence, tasks))
-
-    all_features = results
-
+    start_e = 0
+    for line in pssm_aaid:
+        start_e += 1
+        ivis.visual_easy_time(start_e, len(pssm_aaid))
+        mid_box = []
+        for raa in raacode[1]:
+            raa_box = raacode[0][raa]
+            aabox = ivis.visual_create_n_matrix(len(raa_box))
+            for i in line:
+                for j in raa_box:
+                    if i in j:
+                        aabox[raa_box.index(j)] += 1
+            mid_box.append(aabox)
+        all_features.append(mid_box)
     return all_features
 
 

@@ -4,37 +4,20 @@ file_path = os.path.dirname(__file__)
 import sys
 sys.path.append(file_path)
 import Load as iload
-import numpy as np
-from concurrent.futures import ProcessPoolExecutor
 import Visual as ivis
 import Feature as ifeat
 raac_path = os.path.join(file_path, 'raacDB')
 now_path = os.getcwd()
 extract_method = ['RAAC-PSSM', 'RAAC-KPSSM', 'RAAC-DTPSSM', 'RAAC-SW', 'RAAC-KMER', 'SAAC', 'OAAC']
 
-from concurrent.futures import ProcessPoolExecutor
-import os
-
-
+# extract pssm
 def extract_single(path_list, tp):
-    """并行版本的文件加载函数"""
     pssm_matrix, pssm_aaid, pssm_type = [], [], []
-
-    def load_single_file(file):
-        """单个文件的加载任务"""
-        return iload.load_pssm(file)
-
-    # 使用进程池并行加载文件
-    with ProcessPoolExecutor() as executor:
-        # 提交所有任务
-        results = list(executor.map(load_single_file, path_list))
-
-    # 整理结果
-    for matrix, aaid in results:
+    for file in path_list:
+        matrix, aaid = iload.load_pssm(file)
         pssm_matrix.append(matrix)
         pssm_aaid.append(aaid)
         pssm_type.append(tp)
-
     return pssm_matrix, pssm_aaid, pssm_type
 
 # extract save
@@ -107,36 +90,18 @@ def extract_reduce_col_sf(mid_matrix, reduce, raa_type):
                     out[k][l] += mid_matrix[k][j]
     return out
 
-
-def _scale_single_matrix_np(mat):
-    """完全复制原始代码逻辑的NumPy版本"""
-    np_mat = np.array(mat, dtype=np.float64)
-    result = np.zeros_like(np_mat)
-
-    for i in range(np_mat.shape[0]):
-        row = np_mat[i]
-        min_val = np.min(row)
-        max_val = np.max(row)
-
-        # 逐元素检查，复制原始代码逻辑
-        for j in range(len(row)):
-            if (row[j] - min_val) != 0:
-                result[i][j] = round((row[j] - min_val) / (max_val - min_val), 4)
-            else:
-                result[i][j] = 0
-
-    return result.tolist()
-
-
+# extract scale data
 def extract_scale(matrix):
-    """并行处理，使用NumPy但保持原始逻辑"""
-    if not matrix:
-        return matrix
-
-    with ProcessPoolExecutor() as executor:
-        results = list(executor.map(_scale_single_matrix_np, matrix))
-
-    return results
+    for i in range(len(matrix)):
+        for j in range(len(matrix[i])):
+            min_x = min(matrix[i][j])
+            max_x = max(matrix[i][j])
+            for k in range(len(matrix[i][j])):
+                if (matrix[i][j][k] - min_x) != 0:
+                    matrix[i][j][k] = round((matrix[i][j][k] - min_x) / (max_x - min_x), 4)
+                else:
+                    matrix[i][j][k] = 0
+    return matrix
 
 # extract scale data multy file
 def extract_scale_mf(matrix):
