@@ -306,54 +306,25 @@ def feature_kmer(pssm_aaid, raacode):
     return psekraac_features
 
 
-from multiprocessing import Pool, cpu_count
-import functools
+# AAC #########################################################################
+def feature_oaac(pssm_aaid, raacode):
+    all_features = []
+    start_e = 0
+    for line in pssm_aaid:
+        start_e += 1
+        ivis.visual_easy_time(start_e, len(pssm_aaid))
+        mid_box = []
+        for raa in raacode[1]:
+            raa_box = raacode[0][raa]
+            aabox = ivis.visual_create_n_matrix(len(raa_box))
+            for i in line:
+                for j in raa_box:
+                    if i in j:
+                        aabox[raa_box.index(j)] += 1
+            mid_box.append(aabox)
+        all_features.append(mid_box)
+    return all_features
 
-
-def process_single_line(args):
-    """
-    处理单行数据的函数，用于并行化
-    """
-    line, line_idx, raacode, total_lines = args
-    mid_box = []
-    for raa in raacode[1]:
-        raa_box = raacode[0][raa]
-        aabox = [0] * len(raa_box)  # 替换 ivis.visual_create_n_matrix(len(raa_box))
-        for i in line:
-            for j_idx, j in enumerate(raa_box):
-                if i in j:
-                    aabox[j_idx] += 1
-        mid_box.append(aabox)
-
-    # 进度显示（可选）
-    if line_idx % 100 == 0:  # 每100行显示一次进度，减少输出频率
-        print(f"Processing line {line_idx}/{total_lines}")
-
-    return mid_box
-
-
-def feature_oaac(pssm_aaid, raacode, num_processes=None):
-    """
-    并行版本的 feature_oaac 函数
-    """
-    print('feature_oaac')
-    if num_processes is None:
-        num_processes = cpu_count() - 4  # 使用所有可用的CPU核心
-
-    total_lines = len(pssm_aaid)
-
-    # 准备参数：每行数据 + 行索引 + raacode + 总行数
-    tasks = [(line, idx, raacode, total_lines) for idx, line in enumerate(pssm_aaid)]
-
-    # 使用进程池并行处理
-    with Pool(processes=num_processes) as pool:
-        results = pool.map(process_single_line, tasks)
-
-    return results
-
-
-# 使用示例：
-# all_features = feature_oaac_parallel(pssm_aaid, raacode, num_processes=4)
 
 # SAAC ########################################################################
 def saac_count(file_box, simple_raa):

@@ -130,6 +130,7 @@ def extract_reduce(max_matrix, max_aaid, reduce, raacode):
         for raa in raacode[1]:
             start_n += 1
             ivis.visual_detal_time(start_e, len(max_matrix), start_n, len(raacode[1]))
+            print(f'test')
             file = extract_reduce_row_sf(each_matrix, each_aaid, reduce, raa)
             file = extract_reduce_col_sf(file, reduce, raa)
             new_box = []
