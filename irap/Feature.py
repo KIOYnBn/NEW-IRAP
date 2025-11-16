@@ -1,4 +1,6 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
+import itertools
 file_path = os.path.dirname(__file__)
 import sys
 sys.path.append(file_path)
@@ -40,193 +42,50 @@ def kpssm_ddt(eachfile, k, aa_index):
         out_box[i] = out_box[i] / (len(eachfile) - k - 1)
     return out_box
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
-"""
-最高效实现：
-- numba 编译核心计算
-- 主进程用 shared_memory 存放当前文件所有 reducefile 数据（按连续块）
-- 子进程在 initializer 中 attach 共享内存，接收任务只包含索引和元信息，避免大量序列化
-- 批量处理每个任务内多个 raa（batch_size 可调）
-- 最大进程数 = max(1, cpu_count - 4)
-- tqdm 显示文件与批次进度
-注意：你需要在全局提供 iextra.extract_reduce_col_sf, 以及 raacode、pssm_matrixes、reduce 等实际数据。
-"""
+import concurrent.futures
 
-import os
-import math
-import numpy as np
-from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import shared_memory
-from numba import njit, prange
 
-# ---------------------------
-# NUMBA 编译的核心计算核
-# 请根据你的真实算法把下面函数体改成你原始 kpssm_dt / kpssm_ddt 的逻辑
-# 以下为通用示例实现：按列做 k 间隔乘加汇总（与先前示例一致）
-# ---------------------------
-
-@njit(parallel=True, fastmath=True)
-def kpssm_dt_numba(reducefile_arr, k):
-    L, C = reducefile_arr.shape
-    out = np.zeros(C, dtype=np.float64)
-    max_i = L - k
-    for j in prange(C):
-        s = 0.0
-        for i in range(max_i):
-            s += reducefile_arr[i, j] * reducefile_arr[i + k, j]
-        out[j] = s
-    return out
-
-@njit(parallel=True, fastmath=True)
-def kpssm_ddt_numba(reducefile_arr, k, idxs):
-    L, C = reducefile_arr.shape
-    M = idxs.shape[0]
-    out = np.zeros(M, dtype=np.float64)
-    max_i = L - k
-    for m in prange(M):
-        j = idxs[m]
-        s = 0.0
-        for i in range(max_i):
-            s += reducefile_arr[i, j] * reducefile_arr[i + k, j]
-        out[m] = s
-    return out
-
-# ---------------------------
-# 共享内存管理与子进程初始化
-# ---------------------------
-_shared_shm_name = None
-_shared_shape = None
-_shared_dtype = None
-
-def _child_init(shm_name, shape, dtype_name):
-    global _shared_shm_name, _shared_shape, _shared_dtype, _shared_arr
-    _shared_shm_name = shm_name
-    _shared_shape = shape
-    _shared_dtype = np.dtype(dtype_name)
-    shm = shared_memory.SharedMemory(name=_shared_shm_name)
-    _shared_arr = np.ndarray(_shared_shape, dtype=_shared_dtype, buffer=shm.buf)
-    # _shared_arr 可在子进程中读取；注意不要在子进程关闭共享内存对象（主进程负责 unlink）
-    return
-
-def _child_compute_batch(batch_meta):
-    """
-    batch_meta: list of tuples (start_idx, rows, cols, raa_box_len)
-      - start_idx: 起始行在共享大数组中的行索引
-      - rows: 每个 reducefile 的行数 (L)
-      - cols: 每个 reducefile 的列数 (C)  —— 这里假设同一文件每个 reducefile 的列数相同
-      - raa_box_len: 对应 raa_box 长度，用于 ddt 索引（若 batch 包含多个 raa，每个项不同）
-    返回：list of feature lists（与 raas 的顺序一致）
-    """
-    results = []
-    k = 3
-    # _shared_arr 是主进程写好的二维或三维数组视布局而定
-    # 我们在主进程中把每个 reducefile 以相同列数按行块存储：
-    # layout: big_arr with shape (N_blocks, L_max, C), but simpler实现为 (N_blocks, L, C) flattened to (N_blocks, L*C)
-    # 在这里假设主进程传入 rows, cols 以便正确切片
-    for meta in batch_meta:
-        start_row, L, C, raa_box_len = meta
-        # 取出子数组视图
-        flat_segment = _shared_arr[start_row]
-        reducefile_arr = flat_segment.reshape((L, C))
-        # 调用 numba 内核
-        dt = kpssm_dt_numba(reducefile_arr, k)
-        ddt = kpssm_ddt_numba(reducefile_arr, k, np.arange(raa_box_len, dtype=np.int32))
-        merged = np.concatenate([dt, ddt]).tolist()
-        results.append(merged)
-    return results
-
-# ---------------------------
-# 主函数：feature_kpssm_highest
-# ---------------------------
-
-def feature_kpssm(pssm_matrixes, reduce, raacode, batch_size=16):
-    """
-    参数:
-      - pssm_matrixes: iterable of eachfile identifiers
-      - reduce: 传给 iextra.extract_reduce_col_sf 的参数
-      - raacode: (mapping_dict, iterable_of_raas)
-      - batch_size: 每个并行任务包含多少个 raa（较大能减少调度开销）
-    返回:
-      - kpssm_features: list of per-file mid_matrix (按 raacode[1] 顺序)
-    说明:
-      - 该实现为每个文件创建共享内存并一次性把所有 reducefile 转入共享内存
-      - 子进程只接收索引与元信息进行计算
-    """
-    cpu_cnt = os.cpu_count() or 1
-    workers = max(1, cpu_cnt - 4)
-
+# k_gap_PSSM主程序
+def feature_kpssm(pssm_matrixes, reduce, raacode):
     kpssm_features = []
 
-    for eachfile in tqdm(pssm_matrixes, desc="Files", unit="file", leave=True):
-        raas = list(raacode[1])
-        N = len(raas)
-        if N == 0:
-            kpssm_features.append([])
-            continue
+    # 处理每个 pssm_matrixes 文件的任务
+    def process_eachfile(eachfile, start_e):
+        mid_matrix = []
+        start_n = 0
 
-        # 第一遍主进程读取所有 reducefile，收集它们的 L (rows) 与 C (cols)
-        reduce_blocks = []
-        rows_list = []
-        cols_list = []
-        raa_box_lens = []
-        for raa in raas:
+        # 将 raacode[1] 的处理并行化
+        def process_raa(raa):
+            start_n += 1
+            ivis.visual_detal_time(start_e, len(pssm_matrixes), start_n, len(raacode[1]))
             raa_box = raacode[0][raa]
-            rf = iextra.extract_reduce_col_sf(eachfile, reduce, raa)  # 返回 L x C 的结构
-            arr = np.asarray(rf, dtype=np.float64)
-            L, C = arr.shape
-            reduce_blocks.append(arr)
-            rows_list.append(L)
-            cols_list.append(C)
-            raa_box_lens.append(len(raa_box))
+            reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
+            ddt_index = list(range(len(raa_box)))
+            k = 3
 
-        # 为 simplicity 假设同一文件所有 reducefile 的列数相同（C）
-        # 若列数不同，需要把每个 reducefile pad 到同一 C_max（下面代码已支持 pad）
-        C_max = max(cols_list)
-        L_max = max(rows_list)
+            # DT
+            dt_fs = kpssm_dt(reducefile, k)
+            # DDT
+            ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
+            return dt_fs + ddt_fs
 
-        # 构建共享数组： shape (N, L_max*C_max) 使用 dtype float64
-        big_shape = (N, L_max * C_max)
-        shm = shared_memory.SharedMemory(create=True, size=np.prod(big_shape) * np.dtype(np.float64).itemsize)
-        big_arr = np.ndarray(big_shape, dtype=np.float64, buffer=shm.buf)
-        # 填充共享数组（按行块）
-        for i in range(N):
-            arr = reduce_blocks[i]
-            L, C = arr.shape
-            # 将 arr 放到 (L, C) 区域，剩余用 0 填充
-            flat = np.zeros((L_max * C_max,), dtype=np.float64)
-            # 把 arr 行主序拷贝到 flat 的前 L*C 位置
-            flat[: (L * C)] = arr.reshape(-1)
-            big_arr[i, :] = flat
+        # 这里用 `map` 并行化对 `raacode[1]` 的处理
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            # 对 raacode[1] 进行并行处理
+            results = list(executor.map(process_raa, raacode[1]))  # 并行化对每个 raa 的处理
 
-        # 生成每个 reducefile 在共享数组中的元信息 (start_row index is i)
-        metas = []
-        for i in range(N):
-            metas.append( (i, rows_list[i], C_max, raa_box_lens[i]) )
+        mid_matrix.extend(results)
+        return mid_matrix
 
-        # 划分批次
-        batches = [metas[i:i+batch_size] for i in range(0, N, batch_size)]
+    # 外层并行化任务：对每个 pssm_matrixes 文件进行处理
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = [executor.submit(process_eachfile, eachfile, start_e + i + 1) for i, eachfile in
+                   enumerate(pssm_matrixes)]
 
-        # 为子进程提供共享内存名与 shape/dtype 信息，通过 initializer attach
-        shm_name = shm.name
-        shm_shape = big_shape
-        shm_dtype = np.dtype(np.float64).name
-
-        # 并行计算批次，保证顺序：使用 map 然后展平 batch 结果
-        with ProcessPoolExecutor(max_workers=workers, initializer=_child_init,
-                                 initargs=(shm_name, shm_shape, shm_dtype)) as ex:
-            results_batches = list(tqdm(ex.map(_child_compute_batch, batches), total=len(batches),
-                                        desc=f"Computing batches (file)", unit="batch", leave=False))
-
-        # 展平并恢复为按 raas 顺序的 results（每项对应一个 raa）
-        results = [item for batch in results_batches for item in batch]
-        kpssm_features.append(results)
-
-        # 主进程关闭并 unlink 共享内存
-        shm.close()
-        shm.unlink()
+        # 等待并收集每个文件处理的结果
+        for future in concurrent.futures.as_completed(futures):
+            kpssm_features.append(future.result())
 
     return kpssm_features
 
@@ -364,7 +223,7 @@ def feature_sw(pssm_matrixes, pssm_aaid, reduce, raacode):
     return sw_features
 
 
-# RAAC KMER ################################################################### 
+# RAAC KMER ###################################################################
 def create_kmer_dict(simple_raa, kmer):
     kmer_dcit = {}
     for i in itertools.product("".join(simple_raa), repeat=kmer):
@@ -485,6 +344,42 @@ def feature_oaac(pssm_aaid, raacode):
                         aabox[raa_box.index(j)] += 1
             mid_box.append(aabox)
         all_features.append(mid_box)
+    return all_features
+
+
+
+
+def _process_single_sequence(args):
+    """处理单个序列的辅助函数"""
+    line, raacode = args
+    mid_box = []
+    for raa in raacode[1]:
+        raa_box = raacode[0][raa]
+        aabox = [0] * len(raa_box)  # 创建初始化为0的列表
+
+        for i in line:
+            for j_idx, j in enumerate(raa_box):
+                if i in j:
+                    aabox[j_idx] += 1
+                    break  # 找到匹配就跳出内层循环
+
+        mid_box.append(aabox)
+    return mid_box
+
+
+def feature_oaac_parallel_threads(pssm_aaid, raacode):
+    """使用线程池的并行版本"""
+    all_features = []
+
+    # 准备任务参数
+    tasks = [(line, raacode) for line in pssm_aaid]
+
+    # 使用线程池（对于这种计算密集型但包含循环的任务，线程池可能更快）
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(_process_single_sequence, tasks))
+
+    all_features = results
+
     return all_features
 
 
