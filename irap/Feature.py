@@ -42,45 +42,95 @@ def kpssm_ddt(eachfile, k, aa_index):
         out_box[i] = out_box[i] / (len(eachfile) - k - 1)
     return out_box
 
-import multiprocessing as mp
 
-def process_one_task(args):
-    """处理单个 (file, raa) 组合"""
-    eachfile, reduce, raacode, file_idx, total_files, raa = args
+from multiprocessing import Pool, cpu_count
+import time
+import sys
+
+
+def process_single_raa_kpssm(args):
+    """
+    处理单个raa参数的函数 - 优化版本
+    """
+    eachfile, reduce, raa, raacode = args
     raa_box = raacode[0][raa]
     reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
+
+    # 优化：直接创建range对象，需要时再转换为列表
     ddt_index = list(range(len(raa_box)))
+
     k = 3
+    # DT和DDT计算
     dt_fs = kpssm_dt(reducefile, k)
     ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
-    return file_idx, raa, dt_fs + ddt_fs
+
+    return dt_fs + ddt_fs
 
 
-def feature_kpssm(pssm_matrixes, reduce, raacode):
+def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, length=50, fill='█'):
+    """
+    打印文本进度条
+    """
+    percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + '-' * (length - filled_length)
+    print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='\r')
+    # 当完成时打印新行
+    if iteration == total:
+        print()
+
+
+def feature_kpssm(pssm_matrixes, reduce, raacode, num_processes=None):
+    """
+    最高效的并行版本 - 带有进度条显示
+    """
+    if num_processes is None:
+        num_processes = max(1, cpu_count() - 1)  # 留一个核心给系统
+
     total_files = len(pssm_matrixes)
+    total_raacodes = len(raacode[1])
+    total_tasks = total_files * total_raacodes
 
-    # 构造所有任务 (file × raa)
-    tasks = []
-    for file_idx, eachfile in enumerate(pssm_matrixes, start=1):
+    print(f"开始处理 {total_files} 个PSSM矩阵，每个矩阵 {total_raacodes} 个raacode")
+    print(f"总共 {total_tasks} 个任务，使用 {num_processes} 个进程并行处理")
+
+    start_time = time.time()
+
+    # 一次性准备所有任务参数
+    all_args = []
+    for i, eachfile in enumerate(pssm_matrixes):
         for raa in raacode[1]:
-            tasks.append((eachfile, reduce, raacode, file_idx, total_files, raa))
+            all_args.append((eachfile, reduce, raa, raacode))
 
-    # 全局进程池并行
-    results = []
-    with mp.Pool(processes=mp.cpu_count()) as pool:
-        for res in pool.imap_unordered(process_one_task, tasks):
-            results.append(res)
+    # 优化chunksize - 根据任务数量和进程数动态计算
+    chunksize = max(1, len(all_args) // (num_processes * 4))
+    print(f"使用 chunksize: {chunksize}")
 
-    # 按文件分组结果
-    kpssm_features = [[] for _ in range(total_files)]
-    for file_idx, raa, feature in results:
-        kpssm_features[file_idx-1].append(feature)
+    # 使用imap_unordered获取结果并显示进度
+    completed = 0
+    all_results = [None] * len(all_args)
 
-    # 外层进度条显示
-    for idx in range(1, total_files+1):
-        ivis.visual_detal_time(idx, total_files, 0, 0)
+    with Pool(processes=num_processes) as pool:
+        # 使用imap_unordered可以更早地获得已完成的结果
+        for i, result in enumerate(pool.imap_unordered(process_single_raa_kpssm, all_args, chunksize=chunksize)):
+            all_results[i] = result
+            completed += 1
+            print_progress_bar(completed, total_tasks, prefix='处理进度', suffix=f'已完成 {completed}/{total_tasks}')
+
+    # 重新组织结果
+    kpssm_features = []
+    results_per_file = len(raacode[1])
+    for i in range(total_files):
+        start_idx = i * results_per_file
+        end_idx = start_idx + results_per_file
+        kpssm_features.append(all_results[start_idx:end_idx])
+
+    total_time = time.time() - start_time
+    print(f"\n所有处理完成! 总耗时: {total_time:.2f}秒")
+    print(f"平均每个任务: {total_time / total_tasks * 1000:.2f}毫秒")
 
     return kpssm_features
+
 
 # RAAC DTPSSM #################################################################
 def dtpssm_reduce(raa_box):
