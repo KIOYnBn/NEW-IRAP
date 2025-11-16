@@ -43,29 +43,65 @@ def kpssm_ddt(eachfile, k, aa_index):
     return out_box
 
 
-# k_gap_PSSM主程序
-def feature_kpssm(pssm_matrixes, reduce, raacode):
+from multiprocessing import Pool
+
+def process_single_raa_kpssm(args):
+    """处理单个raa参数的函数"""
+    eachfile, reduce, raa, raacode = args
+    raa_box = raacode[0][raa]
+    reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
+    ddt_index = []
+    for i in range(len(raa_box)):
+        ddt_index.append(i)
+    k = 3
+    # DT
+    dt_fs = kpssm_dt(reducefile, k)
+    # DDT
+    ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
+    return dt_fs + ddt_fs
+
+
+def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, length=50, fill='█'):
+    """
+    打印文本进度条
+    """
+    percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + '-' * (length - filled_length)
+    print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='\r')
+    # 当完成时打印新行
+    if iteration == total:
+        print()
+
+
+def feature_kpssm(pssm_matrixes, reduce, raacode, num_processes=None):
+    """
+    并行处理版本的feature_kpssm函数
+    """
     kpssm_features = []
-    start_e = 0
-    for eachfile in pssm_matrixes:
-        start_e += 1
-        start_n = 0
-        mid_matrix = []
-        for raa in raacode[1]:
-            start_n += 1
-            ivis.visual_detal_time(start_e, len(pssm_matrixes), start_n, len(raacode[1]))
-            raa_box = raacode[0][raa]
-            reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
-            ddt_index = []
-            for i in range(len(raa_box)):
-                ddt_index.append(i)
-            k = 3
-            # DT
-            dt_fs = kpssm_dt(reducefile, k)
-            # DDT
-            ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
-            mid_matrix.append(dt_fs + ddt_fs)
+    total_files = len(pssm_matrixes)
+    total_raacodes = len(raacode[1])
+
+    print(f"开始处理 {total_files} 个PSSM矩阵，每个矩阵 {total_raacodes} 个raacode")
+
+    for i, eachfile in enumerate(pssm_matrixes):
+        # 准备参数
+        args_list = [(eachfile, reduce, raa, raacode) for raa in raacode[1]]
+
+        # 使用进程池并行处理
+        with Pool(processes=num_processes) as pool:
+            # 使用map获取结果（保证顺序）
+            mid_matrix = pool.map(process_single_raa_kpssm, args_list)
+
+        # 添加到结果中
         kpssm_features.append(mid_matrix)
+
+        # 显示进度
+        progress = (i + 1) / total_files * 100
+        print_progress_bar(i + 1, total_files, prefix='总体进度',
+                           suffix=f'已完成 {i + 1}/{total_files} 个文件 ({progress:.1f}%)')
+
+    print("所有PSSM特征提取完成!")
     return kpssm_features
 
 

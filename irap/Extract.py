@@ -145,9 +145,6 @@ def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, lengt
 
 
 def extract_reduce(max_matrix, max_aaid, reduce, raacode, num_processes=None):
-    """
-    带有进度条显示的并行版本
-    """
     out_feature = []
     total_matrices = len(max_matrix)
     total_raacodes = len(raacode[1])
@@ -158,35 +155,17 @@ def extract_reduce(max_matrix, max_aaid, reduce, raacode, num_processes=None):
         each_matrix = max_matrix[i]
         each_aaid = max_aaid[i]
 
-        # 准备参数
         args_list = [(each_matrix, each_aaid, reduce, raa) for raa in raacode[1]]
-
-        # 使用进程池并行处理
         with Pool(processes=num_processes) as pool:
-            # 使用imap_unordered获取结果并显示进度
             results = []
             completed = 0
-
-            # 进度条前缀
             prefix = f'矩阵 {i + 1}/{total_matrices}'
-
-            # 初始化进度条
             print_progress_bar(0, total_raacodes, prefix=prefix, suffix='开始')
-
-            # 使用imap_unordered获取结果（按完成顺序，不是原始顺序）
             for result in pool.imap_unordered(process_single_raa, args_list):
                 results.append(result)
                 completed += 1
                 print_progress_bar(completed, total_raacodes, prefix=prefix, suffix='处理中')
-
-            # 由于imap_unordered不保证顺序，我们需要按原始raacode顺序重新排序结果
-            # 但这里我们无法知道哪个结果对应哪个raacode，所以我们需要修改方法
-
-        # 重新使用map保证顺序，但显示进度会更困难
-        # 作为替代，我们使用一个更简单的方法：在每次处理完一个矩阵后显示进度
         print_progress_bar(i + 1, total_matrices, prefix='总体进度', suffix=f'已完成 {i + 1}/{total_matrices}')
-
-        # 将结果添加到输出中
         out_feature.append(results)
 
     print("所有处理完成!")
@@ -238,10 +217,12 @@ def extract_pssm(method=[0,1,2,3,4,5,6], pos=None, neg=None, reduce=False, raaBo
             raacode = iload.load_raac(os.path.join(raac_path, raaBook))
             method_id = '-'
             # RAAC-PSSM
+            '''
             if 0 in method:
                 raac_pssm_fs = extract_reduce(pos_matrix + neg_matrix, pos_aaid + neg_aaid, raaBook, raacode)
                 raac_pssm_fs = extract_scale(raac_pssm_fs)
                 method_id += '0'
+            '''
             # RAAC-KPSSM
             if 1 in method:
                 raac_kpssm_fs = ifeat.feature_kpssm(pos_matrix + neg_matrix, raaBook, raacode)
