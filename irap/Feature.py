@@ -336,6 +336,7 @@ def feature_oaac(pssm_aaid, raacode, num_processes=None):
     """
     并行版本的 feature_oaac 函数
     """
+    print('feature_oaac')
     if num_processes is None:
         num_processes = cpu_count() - 4  # 使用所有可用的CPU核心
 
