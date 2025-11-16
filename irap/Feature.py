@@ -40,60 +40,81 @@ def kpssm_ddt(eachfile, k, aa_index):
         out_box[i] = out_box[i] / (len(eachfile) - k - 1)
     return out_box
 
-
-from concurrent.futures import ProcessPoolExecutor, as_completed
+# 需要库
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
+import numpy as np
 
-# 辅助函数，顶层定义以便子进程能 picklable
-def _process_raa_for_file(args):
-    eachfile, reduce, raa, raacode, start_e, total_files = args
-    # 可选：在子进程里也可以不做进度打印，主进程负责总体进度
-    raa_box = raacode[0][raa]
-    reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
-    ddt_index = list(range(len(raa_box)))
+# ---------- 1) numba 版本（如果可以修改 kpssm_dt / kpssm_ddt） ----------
+# 将计算密集函数用 numba 编译（示例框架，需根据实际实现改写）
+from numba import njit, prange
+
+@njit(fastmath=True)
+def kpssm_dt_numba(reducefile_arr, k):
+    # reducefile_arr: numpy array shape (L, C)
+    L, C = reducefile_arr.shape
+    # 示例：实际实现替换为你的DT逻辑
+    out = np.zeros(C, dtype=np.float64)
+    for j in prange(C):
+        s = 0.0
+        for i in range(L - k):
+            s += reducefile_arr[i, j] * reducefile_arr[i + k, j]
+        out[j] = s
+    return out
+
+@njit(fastmath=True)
+def kpssm_ddt_numba(reducefile_arr, k, ddt_index):
+    # ddt_index: 1d int array of indices length M
+    L, C = reducefile_arr.shape
+    M = ddt_index.shape[0]
+    out = np.zeros(M, dtype=np.float64)
+    for idx in prange(M):
+        j = ddt_index[idx]
+        s = 0.0
+        for i in range(L - k):
+            s += reducefile_arr[i, j] * reducefile_arr[i + k, j]
+        out[idx] = s
+    return out
+
+# ---------- 2) 主进程预处理 + 进程池并行（通用，适用于未能改写为 numba 的情况） ----------
+def _worker_compute(args):
+    # 入参尽量小：reducefile (numpy array or small list), raa_box_length (int)
+    reducefile_arr, raa_box_len = args
     k = 3
-    dt_fs = kpssm_dt(reducefile, k)
-    ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
-    return raa, dt_fs + ddt_fs
+    # 如果你有 numba 函数可直接调用；否则调用原 kpssm_dt / kpssm_ddt
+    try:
+        # 假设 numba 编译的函数已经存在
+        dt = kpssm_dt_numba(reducefile_arr, k)
+        ddt = kpssm_ddt_numba(reducefile_arr, k, np.arange(raa_box_len, dtype=np.int32))
+        # 将结果合并成你原来期望的结构（list/ndarray）
+        return np.concatenate([dt, ddt]).tolist()
+    except NameError:
+        # 回退到原函数（需保证原函数能接受 numpy array）
+        dt = kpssm_dt(reducefile_arr, k)
+        ddt = kpssm_ddt(reducefile_arr, k, list(range(raa_box_len)))
+        return dt + ddt
 
 def feature_kpssm(pssm_matrixes, reduce, raacode, max_workers=None):
-    """
-    并行化版 feature_kpssm
-    - 每个输入文件内部对 raacode[1] 的计算并行化
-    - 使用 tqdm 显示整体进度（按文件 + 每文件内部任务）
-    - max_workers: None 表示使用 ProcessPoolExecutor 默认的 worker 数量
-    """
     kpssm_features = []
-
     total_files = len(pssm_matrixes)
-    # 逐文件处理，主进程显示每个文件的进度条，子进程并行计算该文件内的 raa 任务
-    for start_e, eachfile in enumerate(tqdm(pssm_matrixes, desc="Files", unit="file", leave=True), start=1):
+    # 遍历文件，主进程一次性准备所有 reducefiles（避免子进程重复 I/O）
+    for eachfile in tqdm(pssm_matrixes, desc="Files", unit="file"):
         raas = list(raacode[1])
-        mid_matrix = []
-
-        # 准备每个 raa 的参数元组，方便传入子进程
-        tasks_args = [(eachfile, reduce, raa, raacode, start_e, total_files) for raa in raas]
-
-        # 使用 ProcessPoolExecutor 并用 tqdm 跟踪该文件内部任务完成情况
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_process_raa_for_file, arg): arg[2] for arg in tasks_args}
-            for f in tqdm(as_completed(futures), total=len(futures), desc=f"File {start_e}/{total_files}", unit="raa", leave=False):
-                # as_completed 的迭代只保证返回顺序为完成顺序；结果按 raa 名称收集后再按 raas 顺序重建
-                pass
-
-            # 为了保证结果按原始 raas 顺序，先收集所有结果
-            results = []
-            for fut in futures:
-                res = fut.result()
-                results.append(res)  # (raa, feature_list)
-
-        # 按 raas 的原始顺序将结果放回 mid_matrix
-        results_dict = {raa: features for raa, features in results}
+        args_list = []
+        # 主进程做 I/O 并将 reducefile 转为 numpy 数组（更易序列化且供 numba 使用）
         for raa in raas:
-            mid_matrix.append(results_dict[raa])
+            raa_box = raacode[0][raa]
+            reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)  # 返回可转换为 numpy 的结构
+            reducefile_arr = np.asarray(reducefile, dtype=np.float64)
+            args_list.append((reducefile_arr, len(raa_box)))
 
-        kpssm_features.append(mid_matrix)
-
+        # 进程池并行；chunksize 可调，默认取 max(1, len(args)//(workers*4))
+        workers = max_workers or None
+        chunksize = max(1, len(args_list) // ( (workers or 4) * 4 ))
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            results = list(tqdm(ex.map(_worker_compute, args_list, chunksize=chunksize),
+                                total=len(args_list), desc=f"Computing per-file", unit="raa", leave=False))
+        kpssm_features.append(results)
     return kpssm_features
 
 
