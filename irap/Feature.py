@@ -44,50 +44,43 @@ def kpssm_ddt(eachfile, k, aa_index):
 
 import multiprocessing as mp
 
-def process_one_raa(args):
-    """处理单个 raa 的特征"""
-    eachfile, reduce, raacode, raa = args
+def process_one_task(args):
+    """处理单个 (file, raa) 组合"""
+    eachfile, reduce, raacode, file_idx, total_files, raa = args
     raa_box = raacode[0][raa]
     reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
     ddt_index = list(range(len(raa_box)))
     k = 3
     dt_fs = kpssm_dt(reducefile, k)
     ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
-    return dt_fs + ddt_fs
-
-
-def process_one_file(eachfile, reduce, raacode):
-    """处理单个文件的所有 raa"""
-    args_list = [(eachfile, reduce, raacode, raa) for raa in raacode[1]]
-
-    # 内层循环并行化
-    with mp.Pool() as pool:
-        mid_matrix = pool.map(process_one_raa, args_list)
-
-    return mid_matrix
+    return file_idx, raa, dt_fs + ddt_fs
 
 
 def feature_kpssm(pssm_matrixes, reduce, raacode):
-    """主程序：并行处理所有文件，只显示外层进度"""
-    total_e = len(pssm_matrixes)
-    kpssm_features = []
+    total_files = len(pssm_matrixes)
 
-    # 外层循环并行化
-    with mp.Pool() as pool:
-        results = []
-        for idx, eachfile in enumerate(pssm_matrixes, start=1):
-            # 只在这里显示进度
-            ivis.visual_detal_time(idx, total_e, 0, 0)
-            results.append(pool.apply_async(process_one_file, (eachfile, reduce, raacode)))
+    # 构造所有任务 (file × raa)
+    tasks = []
+    for file_idx, eachfile in enumerate(pssm_matrixes, start=1):
+        for raa in raacode[1]:
+            tasks.append((eachfile, reduce, raacode, file_idx, total_files, raa))
 
-        # 收集结果
-        for r in results:
-            kpssm_features.append(r.get())
+    # 全局进程池并行
+    results = []
+    with mp.Pool(processes=mp.cpu_count()) as pool:
+        for res in pool.imap_unordered(process_one_task, tasks):
+            results.append(res)
+
+    # 按文件分组结果
+    kpssm_features = [[] for _ in range(total_files)]
+    for file_idx, raa, feature in results:
+        kpssm_features[file_idx-1].append(feature)
+
+    # 外层进度条显示
+    for idx in range(1, total_files+1):
+        ivis.visual_detal_time(idx, total_files, 0, 0)
 
     return kpssm_features
-
-
-
 
 # RAAC DTPSSM #################################################################
 def dtpssm_reduce(raa_box):
