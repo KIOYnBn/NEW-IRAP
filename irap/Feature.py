@@ -44,51 +44,61 @@ def kpssm_ddt(eachfile, k, aa_index):
 
 
 import concurrent.futures
+from functools import partial
 
 
-# k_gap_PSSM主程序
-def feature_kpssm(pssm_matrixes, reduce, raacode):
-    kpssm_features = []
+def process_single_task(args, reduce, raacode, k=3):
+    """
+    处理单个任务的函数，将被多线程调用
+    """
+    eachfile, file_idx, raa, raa_idx = args
+    raa_box = raacode[0][raa]
+    reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
+    ddt_index = list(range(len(raa_box)))
 
-    # 处理每个 pssm_matrixes 文件的任务
-    def process_eachfile(eachfile, start_e):
-        mid_matrix = []
-        start_n = 0
+    # DT 和 DDT 计算
+    dt_fs = kpssm_dt(reducefile, k)
+    ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
 
-        # 将 raacode[1] 的处理并行化
-        def process_raa(raa):
-            start_n += 1
-            ivis.visual_detal_time(start_e, len(pssm_matrixes), start_n, len(raacode[1]))
-            raa_box = raacode[0][raa]
-            reducefile = iextra.extract_reduce_col_sf(eachfile, reduce, raa)
-            ddt_index = list(range(len(raa_box)))
-            k = 3
+    return file_idx, raa_idx, dt_fs + ddt_fs
 
-            # DT
-            dt_fs = kpssm_dt(reducefile, k)
-            # DDT
-            ddt_fs = kpssm_ddt(reducefile, k, ddt_index)
-            return dt_fs + ddt_fs
 
-        # 这里用 `map` 并行化对 `raacode[1]` 的处理
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            # 对 raacode[1] 进行并行处理
-            results = list(executor.map(process_raa, raacode[1]))  # 并行化对每个 raa 的处理
+def feature_kpssm(pssm_matrixes, reduce, raacode, max_workers=None):
+    """
+    优化后的版本：扁平化任务 + 多线程处理
+    """
+    # 1. 任务扁平化：创建所有需要处理的任务列表
+    tasks = []
+    for file_idx, eachfile in enumerate(pssm_matrixes):
+        for raa_idx, raa in enumerate(raacode[1]):
+            tasks.append((eachfile, file_idx, raa, raa_idx))
 
-        mid_matrix.extend(results)
-        return mid_matrix
+    # 2. 初始化结果存储结构
+    kpssm_features = [[None] * len(raacode[1]) for _ in range(len(pssm_matrixes))]
 
-    # 外层并行化任务：对每个 pssm_matrixes 文件进行处理
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        futures = [executor.submit(process_eachfile, eachfile, start_e + i + 1) for i, eachfile in
-                   enumerate(pssm_matrixes)]
+    # 3. 创建线程池并行处理任务
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 使用偏函数固定参数
+        process_func = partial(process_single_task, reduce=reduce, raacode=raacode)
 
-        # 等待并收集每个文件处理的结果
-        for future in concurrent.futures.as_completed(futures):
-            kpssm_features.append(future.result())
+        # 提交所有任务
+        future_to_task = {executor.submit(process_func, task): task for task in tasks}
+
+        # 处理完成的任务
+        for future in concurrent.futures.as_completed(future_to_task):
+            try:
+                file_idx, raa_idx, result = future.result()
+                kpssm_features[file_idx][raa_idx] = result
+
+                # 可选：进度显示（线程安全方式）
+                print(f"进度: 文件 {file_idx + 1}/{len(pssm_matrixes)}, "
+                      f"氨基酸 {raa_idx + 1}/{len(raacode[1])}")
+
+            except Exception as e:
+                task = future_to_task[future]
+                print(f"任务处理失败: 文件{task[1]}, 氨基酸{task[3]}, 错误: {e}")
 
     return kpssm_features
-
 
 # RAAC DTPSSM #################################################################
 def dtpssm_reduce(raa_box):
