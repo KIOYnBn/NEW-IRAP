@@ -305,29 +305,6 @@ def feature_kmer(pssm_aaid, raacode):
     psekraac_features = psekraac_sum(k_fs, kg_fs, kgl_fs)
     return psekraac_features
 
-
-# AAC #########################################################################
-def feature_oaac(pssm_aaid, raacode):
-    all_features = []
-    start_e = 0
-    for line in pssm_aaid:
-        start_e += 1
-        ivis.visual_easy_time(start_e, len(pssm_aaid))
-        mid_box = []
-        for raa in raacode[1]:
-            raa_box = raacode[0][raa]
-            aabox = ivis.visual_create_n_matrix(len(raa_box))
-            for i in line:
-                for j in raa_box:
-                    if i in j:
-                        aabox[raa_box.index(j)] += 1
-            mid_box.append(aabox)
-        all_features.append(mid_box)
-    return all_features
-
-
-
-
 def _process_single_sequence(args):
     """处理单个序列的辅助函数"""
     line, raacode = args
@@ -346,7 +323,7 @@ def _process_single_sequence(args):
     return mid_box
 
 
-def feature_oaac_parallel_threads(pssm_aaid, raacode):
+def feature_oaac(pssm_aaid, raacode):
     """使用线程池的并行版本"""
     all_features = []
 
