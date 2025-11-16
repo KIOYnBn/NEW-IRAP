@@ -94,7 +94,8 @@ def _worker_compute(args):
         ddt = kpssm_ddt(reducefile_arr, k, list(range(raa_box_len)))
         return dt + ddt
 
-def feature_kpssm(pssm_matrixes, reduce, raacode, max_workers=None):
+def feature_kpssm(pssm_matrixes, reduce, raacode):
+    max_workers = os.cpu_count() - 4
     kpssm_features = []
     total_files = len(pssm_matrixes)
     # 遍历文件，主进程一次性准备所有 reducefiles（避免子进程重复 I/O）
